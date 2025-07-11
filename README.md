@@ -8,5 +8,5 @@ Built a gradient boosting model that achieved an accuracy of 95.4% in sorting pi
 
 ## Repo Map
 |      File         |               Purpose                    |
-|`UCLA2023-2024.csv`| Contains the data needed to run the code |
+|`xgb_model.RData`  | Contains the data needed to run the code |
 |`xgb_model.rmd`    | The code used to create the model        |
