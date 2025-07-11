@@ -1,0 +1,122 @@
+---
+title: "XGB Pitch Type Model"
+author: "Albert"
+date: "2025-01-13"
+output: html_document
+---
+
+```{r }
+# All code necessary to crate final xgb pitch type model
+
+# We start by reading in the data and removing columns with a lot of missing 
+# values
+library(tidyverse)
+pitch_data <- read.csv("UCLA2023-2024.csv", stringsAsFactors = TRUE)
+pitch_data <- pitch_data[, colSums(is.na(pitch_data))/nrow(pitch_data) 
+                         <= 0.25]
+
+# Now we remove the undefined, other, and one seam fastball categories entirely
+# because they do not represent what we are trying to predict in terms of
+# pitch type. We also turns two seam fastballs into just fastballs and 
+# splitters into change-ups since it makes the model more accurate
+pitch_data <- pitch_data %>% filter(!TaggedPitchType %in% 
+                                    c("Undefined", "Other", "OneSeamFastBall"))
+pitch_data$TaggedPitchType[
+  pitch_data$TaggedPitchType == "FourSeamFastBall"] <- "Fastball"
+pitch_data$TaggedPitchType <- factor(droplevels(pitch_data$TaggedPitchType))
+pitch_data$TaggedPitchType[
+  pitch_data$TaggedPitchType == "TwoSeamFastball"] <- "Sinker"
+pitch_data$TaggedPitchType[
+   pitch_data$TaggedPitchType == "Splitter"] <- "ChangeUp"
+pitch_data$TaggedPitchType <- droplevels(pitch_data$TaggedPitchType)
+
+# Now we take out logistical variables that have no relationship with pitch
+# type to avoid any confusion within our model 
+logistical_vars <- c("Date", "Time", "PAofInning", "PitchofPA",
+                     "Pitcher", "PitcherId", "PitcherThrows", "PitcherTeam",
+                     "Batter", "BatterId", "BatterSide", "BatterTeam", 
+                     "PitcherSet", "Inning", "Top_Bottom", "Outs", "Balls", 
+                     "Strikes", "AutoPitchType", "PitchCall", "KorBB", 
+                     "OutsOnPlay", "y0", "TaggedHitType", "PlayResult", 
+                     "RunsScored", "HomeTeam", "AwayTeam", "Stadium", 
+                     "GameUID", "Level", "League", "GameID", "UTCDate", 
+                     "UTCTime", "PitchUID", "LocalDateTime", "UTCDateTime", 
+                     "System", "HomeTeamForeignID", "AwayTeamForeignID", 
+                     "GameForeignID", "Catcher", "CatcherId", "CatcherThrows", 
+                     "CatcherTeam", "PlayID", "Tilt")
+pitch_data <- pitch_data[, !colnames(pitch_data) %in% logistical_vars]
+pitch_data <- pitch_data %>%
+  mutate(non_missing_predictors = 
+           rowSums(!is.na(select(., -c("TaggedPitchType", "PitchNo"))))) %>%
+  filter(non_missing_predictors > 3)
+
+# We continue reducing our data by keeping only important variables based
+# on the results of the full model. We also keep variables that help reduce
+# common mistakes(classifying curveballs as sliders e.g.) and store pitch ids 
+# in case we want to compare results for specific observations
+selected_features <- c("VertBreak", "SpinRate", "ax0", "RelSpeed", "SpinAxis",
+                       "RelSide", "pfxx", "InducedVertBreak", "ZoneTime", 
+                       "RelHeight", "Extension", "HorzBreak","vy0", 
+                       "az0", "pfxz","HorzApprAngle", "Effective Velo",
+                       "PitchTrajectoryYc2", "PitchTrajectoryXc1")
+pitch_data <- pitch_data[, colnames(pitch_data) %in% 
+                               c(selected_features, "TaggedPitchType")]
+pitch_ids <- pitch_data$PitchNo
+
+# Now we impute the data using the miss forest package
+library(missForest)
+imputed_pitch <- missForest(pitch_data, maxiter = 5, ntree = 100,
+                            parallelize = "no", verbose = TRUE)
+pitch_data <- imputed_pitch$ximp
+pitch_data <- as_tibble(pitch_data)
+```
+
+
+
+```{r }
+# Splitting data into training and testing sets
+set.seed(1014)
+train_index <- sample(1:nrow(pitch_data), 0.75 * nrow(pitch_data))
+pitch_train <- pitch_data[train_index, ]
+pitch_test <- pitch_data[-train_index, ]
+
+# Preparing the data to train the full model by removing variables that are
+# highly correlated with each other and features that made up less than 5%
+# of the overall importance/gain of the base boosting model with all predictors
+pitch_train$TaggedPitchType <- as.numeric(pitch_train$TaggedPitchType) - 1
+pitch_test$TaggedPitchType <- as.numeric(pitch_test$TaggedPitchType) - 1
+train_matrix <- model.matrix(TaggedPitchType ~ . - 1, data = pitch_train)
+test_matrix <- model.matrix(TaggedPitchType ~ . - 1, data = pitch_test)
+train_response <- pitch_train$TaggedPitchType
+test_response <- pitch_test$TaggedPitchType
+```
+
+
+```{r}
+set.seed(1014)
+library(xgboost)
+dtrain <- xgb.DMatrix(data = train_matrix, label = train_response)
+dval <- xgb.DMatrix(data = test_matrix, label = test_response)
+watchlist <- list(train = dtrain, eval  = dval)
+final_model <- xgb.train(data = dtrain, watchlist = watchlist,  
+                          eval_metric = "mlogloss", 
+                          objective = "multi:softmax", 
+                          num_class = length(unique(train_response)),  
+                          nrounds = 1000, eta = 0.3, max_depth = 10, 
+                          verbose = 0, early_stopping_rounds = 50)
+
+# We assess the performance of the model through its testing accuracy
+library(caret)
+predictions <- predict(final_model, newdata = test_matrix)
+pitch_levels <- c("ChangeUp", "Curveball", "Cutter", "Fastball", "Sinker",
+                  "Slider")
+predicted_labels <- factor(predictions, levels = 0:(length(pitch_levels) - 1),
+                           labels = pitch_levels)
+actual_labels <- factor(test_response, levels = 0:(length(pitch_levels) - 1), 
+                        labels = pitch_levels)
+final_results <- confusionMatrix(predicted_labels, actual_labels)
+
+
+```
+
+
